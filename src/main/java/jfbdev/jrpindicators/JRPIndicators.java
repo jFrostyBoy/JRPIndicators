@@ -13,6 +13,7 @@ import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitRunnable;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 import java.util.*;
 
@@ -20,28 +21,39 @@ public class JRPIndicators extends JavaPlugin implements CommandExecutor, TabCom
 
     private JRPIndicatorsExpansion placeholderExpansion;
     private int daysPerMonth;
+    private int startYear;
     private final Map<String, List<Integer>> seasonMonths = new HashMap<>();
     private final Map<String, String> seasonNames = new HashMap<>();
     private String lastDayPhase = "";
     private String lastWeather = "";
-    private int lastMonth = -1;
+    private String lastSeason = "";
+    private String lastZodiac = "";
+    private String lastHolidayDate = "";
     private final Map<String, List<String>> dayGreetings = new HashMap<>();
     private final Map<String, List<String>> weatherGreetings = new HashMap<>();
     private final Map<String, List<String>> seasonGreetings = new HashMap<>();
+    private final Map<String, List<String>> zodiacGreetings = new HashMap<>();
+    private final Map<String, List<String>> holidayGreetings = new HashMap<>();
+    private final Map<String, String> holidayNames = new HashMap<>();
     private boolean dayGreetingEnabled;
     private boolean weatherGreetingEnabled;
     private boolean seasonGreetingEnabled;
+    private boolean zodiacGreetingEnabled;
+    private boolean holidayGreetingEnabled;
     private final Random random = new Random();
 
     @Override
     public void onEnable() {
         saveDefaultConfig();
-        daysPerMonth = getConfig().getInt("calendar.months_days_count", 28);
+        loadConfigValues();
         loadSeasons();
         loadGreetings();
-        Objects.requireNonNull(getCommand("rpreload")).setExecutor(this);
+        loadHolidays();
 
-        if (getServer().getPluginManager().getPlugin("PlaceholderAPI") != null) {
+        Objects.requireNonNull(getCommand("jrpi")).setExecutor(this);
+        Objects.requireNonNull(getCommand("jrpi")).setTabCompleter(this);
+
+        if (Bukkit.getPluginManager().getPlugin("PlaceholderAPI") != null) {
             placeholderExpansion = new JRPIndicatorsExpansion(this);
             placeholderExpansion.register();
         }
@@ -49,18 +61,14 @@ public class JRPIndicators extends JavaPlugin implements CommandExecutor, TabCom
         new BukkitRunnable() {
             @Override
             public void run() {
-                checkDayPhaseChange();
-                checkWeatherChange();
-                checkSeasonChange();
+                checkAllChanges();
             }
-        }.runTaskTimer(this, 0L, 20L);
+        }.runTaskTimer(this, 0L, 20L * 30);
     }
 
-    @Override
-    public void onDisable() {
-        if (placeholderExpansion != null) {
-            placeholderExpansion.unregister();
-        }
+    private void loadConfigValues() {
+        daysPerMonth = getConfig().getInt("calendar.months_days_count", 28);
+        startYear = getConfig().getInt("calendar.start_year", 1200);
     }
 
     private void loadSeasons() {
@@ -72,22 +80,20 @@ public class JRPIndicators extends JavaPlugin implements CommandExecutor, TabCom
         seasonMonths.put("autumn", List.of(9, 10, 11));
         seasonMonths.put("winter", List.of(12, 1, 2));
 
-        seasonNames.put("spring", "&aВесна");
-        seasonNames.put("summer", "&eЛето");
-        seasonNames.put("autumn", "&6Осень");
-        seasonNames.put("winter", "&bЗима");
+        seasonNames.put("spring", getConfig().getString("seasons.spring.name", "&aВесна"));
+        seasonNames.put("summer", getConfig().getString("seasons.summer.name", "&eЛето"));
+        seasonNames.put("autumn", getConfig().getString("seasons.autumn.name", "&6Осень"));
+        seasonNames.put("winter", getConfig().getString("seasons.winter.name", "&bЗима"));
 
-        if (!getConfig().isConfigurationSection("seasons")) {
-            return;
-        }
-
-        for (String seasonKey : Objects.requireNonNull(getConfig().getConfigurationSection("seasons")).getKeys(false)) {
-            List<Integer> months = getConfig().getIntegerList("seasons." + seasonKey + ".months");
-            String name = getConfig().getString("seasons." + seasonKey + ".name", seasonKey);
-
-            if (!months.isEmpty()) {
-                seasonMonths.put(seasonKey.toLowerCase(), months);
-                seasonNames.put(seasonKey.toLowerCase(), name);
+        if (getConfig().isConfigurationSection("seasons")) {
+            for (String key : Objects.requireNonNull(getConfig().getConfigurationSection("seasons")).getKeys(false)) {
+                String path = "seasons." + key + ".";
+                List<Integer> months = getConfig().getIntegerList(path + "months");
+                String name = getConfig().getString(path + "name", key);
+                if (!months.isEmpty()) {
+                    seasonMonths.put(key.toLowerCase(), months);
+                    seasonNames.put(key.toLowerCase(), name);
+                }
             }
         }
     }
@@ -96,89 +102,140 @@ public class JRPIndicators extends JavaPlugin implements CommandExecutor, TabCom
         dayGreetingEnabled = getConfig().getBoolean("day-greeting.enabled", false);
         weatherGreetingEnabled = getConfig().getBoolean("weather-greeting.enabled", false);
         seasonGreetingEnabled = getConfig().getBoolean("season-greeting.enabled", false);
+        zodiacGreetingEnabled = getConfig().getBoolean("zodiac_year_greeting.enabled", false);
+        holidayGreetingEnabled = getConfig().getBoolean("holiday_greeting.enabled", false);
 
         dayGreetings.clear();
         weatherGreetings.clear();
         seasonGreetings.clear();
+        zodiacGreetings.clear();
+        holidayGreetings.clear();
 
-        if (getConfig().isConfigurationSection("day-greeting")) {
-            for (String phase : List.of("morning", "day", "evening", "night")) {
-                List<String> messages = getConfig().getStringList("day-greeting." + phase);
-                if (!messages.isEmpty()) {
-                    dayGreetings.put(phase, messages);
+        for (String phase : List.of("morning", "day", "evening", "night")) {
+            List<String> msgs = getConfig().getStringList("day-greeting." + phase);
+            if (!msgs.isEmpty()) dayGreetings.put(phase, msgs);
+        }
+
+        for (String w : List.of("sun", "rain", "snow", "storm")) {
+            List<String> msgs = getConfig().getStringList("weather-greeting." + w);
+            if (!msgs.isEmpty()) weatherGreetings.put(w, msgs);
+        }
+
+        for (String s : List.of("spring", "summer", "autumn", "winter")) {
+            List<String> msgs = getConfig().getStringList("season-greeting." + s);
+            if (!msgs.isEmpty()) seasonGreetings.put(s, msgs);
+        }
+
+        if (getConfig().isConfigurationSection("zodiac_year_greeting")) {
+            for (String animal : Objects.requireNonNull(getConfig().getConfigurationSection("zodiac_year_greeting")).getKeys(false)) {
+                List<String> msgs = getConfig().getStringList("zodiac_year_greeting." + animal);
+                if (!msgs.isEmpty()) {
+                    zodiacGreetings.put(animal, msgs);
                 }
             }
         }
 
-        if (getConfig().isConfigurationSection("weather-greeting")) {
-            for (String weather : List.of("sun", "rain", "snow", "storm")) {
-                List<String> messages = getConfig().getStringList("weather-greeting." + weather);
-                if (!messages.isEmpty()) {
-                    weatherGreetings.put(weather, messages);
-                }
-            }
-        }
-
-        if (getConfig().isConfigurationSection("season-greeting")) {
-            for (String season : List.of("spring", "summer", "autumn", "winter")) {
-                List<String> messages = getConfig().getStringList("season-greeting." + season);
-                if (!messages.isEmpty()) {
-                    seasonGreetings.put(season, messages);
+        if (getConfig().isConfigurationSection("holiday_greeting")) {
+            for (String date : Objects.requireNonNull(getConfig().getConfigurationSection("holiday_greeting")).getKeys(false)) {
+                List<String> msgs = getConfig().getStringList("holiday_greeting." + date);
+                if (!msgs.isEmpty()) {
+                    holidayGreetings.put(date, msgs);
                 }
             }
         }
     }
 
-    private void checkDayPhaseChange() {
+    private void loadHolidays() {
+        holidayNames.clear();
+        if (getConfig().isConfigurationSection("holidays.dates")) {
+            for (String key : Objects.requireNonNull(getConfig().getConfigurationSection("holidays.dates")).getKeys(false)) {
+                String name = getConfig().getString("holidays.dates." + key, "");
+                if (!name.isEmpty()) {
+                    holidayNames.put(key, colorize(name));
+                }
+            }
+        }
+    }
+
+    private void checkAllChanges() {
+        World world = getMainWorld();
+        if (world == null) return;
+
+        checkDayPhaseChange(world);
+        checkWeatherChange(world);
+        checkSeasonChange(world);
+        checkZodiacChange(world);
+        checkHolidayChange(world);
+    }
+
+    private @Nullable World getMainWorld() {
+        List<World> worlds = Bukkit.getWorlds();
+        return worlds.isEmpty() ? null : worlds.get(0);
+    }
+
+    private void checkDayPhaseChange(World world) {
         if (!dayGreetingEnabled) return;
-        World world = Bukkit.getWorlds().get(0);
-        if (world == null) return;
-
-        String currentPhase = getCurrentDayPhase(world);
-        if (!currentPhase.equals(lastDayPhase) && !currentPhase.isEmpty()) {
-            List<String> messages = dayGreetings.get(currentPhase);
-            if (messages != null && !messages.isEmpty()) {
-                String message = messages.get(random.nextInt(messages.size()));
-                Bukkit.broadcastMessage(colorize(message));
+        String current = getCurrentDayPhaseKey(world);
+        if (!current.equals(lastDayPhase) && !current.isEmpty()) {
+            List<String> msgs = dayGreetings.get(current);
+            if (msgs != null && !msgs.isEmpty()) {
+                Bukkit.broadcastMessage(colorize(msgs.get(random.nextInt(msgs.size()))));
             }
-            lastDayPhase = currentPhase;
+            lastDayPhase = current;
         }
     }
 
-    private void checkWeatherChange() {
+    private void checkWeatherChange(World world) {
         if (!weatherGreetingEnabled) return;
-        World world = Bukkit.getWorlds().get(0);
-        if (world == null) return;
-
-        String currentWeather = getCurrentWeatherType(world);
-        if (!currentWeather.equals(lastWeather) && !currentWeather.isEmpty()) {
-            List<String> messages = weatherGreetings.get(currentWeather);
-            if (messages != null && !messages.isEmpty()) {
-                String message = messages.get(random.nextInt(messages.size()));
-                Bukkit.broadcastMessage(colorize(message));
+        String current = getCurrentWeatherKey(world);
+        if (!current.equals(lastWeather) && !current.isEmpty()) {
+            List<String> msgs = weatherGreetings.get(current);
+            if (msgs != null && !msgs.isEmpty()) {
+                Bukkit.broadcastMessage(colorize(msgs.get(random.nextInt(msgs.size()))));
             }
-            lastWeather = currentWeather;
+            lastWeather = current;
         }
     }
 
-    private void checkSeasonChange() {
+    private void checkSeasonChange(World world) {
         if (!seasonGreetingEnabled) return;
-        World world = Bukkit.getWorlds().get(0);
-        if (world == null) return;
-
-        int currentMonth = getGameMonth(world);
-        if (currentMonth != lastMonth && lastMonth != -1) {
-            String currentSeason = getSeasonKey(world);
-            List<String> messages = seasonGreetings.get(currentSeason);
-            if (messages != null && !messages.isEmpty()) {
-                String message = messages.get(random.nextInt(messages.size()));
-                Bukkit.broadcastMessage(colorize(message));
+        String currentSeason = getSeasonKey(world);
+        if (!currentSeason.equals(lastSeason) && !lastSeason.isEmpty()) {
+            List<String> msgs = seasonGreetings.get(currentSeason);
+            if (msgs != null && !msgs.isEmpty()) {
+                Bukkit.broadcastMessage(colorize(msgs.get(random.nextInt(msgs.size()))));
             }
         }
-        lastMonth = currentMonth;
+        lastSeason = currentSeason;
     }
 
-    private String getCurrentDayPhase(World world) {
+    private void checkZodiacChange(World world) {
+        if (!zodiacGreetingEnabled) return;
+        String currentZodiac = getZodiacAnimal(world);
+        if (!currentZodiac.equals(lastZodiac) && !currentZodiac.isEmpty()) {
+            List<String> messages = zodiacGreetings.get(currentZodiac);
+            if (messages != null && !messages.isEmpty()) {
+                String msg = messages.get(random.nextInt(messages.size()));
+                Bukkit.broadcastMessage(colorize(msg));
+            }
+            lastZodiac = currentZodiac;
+        }
+    }
+
+    private void checkHolidayChange(World world) {
+        if (!holidayGreetingEnabled) return;
+        String currentDateKey = getGameMonth(world) + "-" + getGameDay(world);
+        if (!currentDateKey.equals(lastHolidayDate) && !lastHolidayDate.isEmpty()) {
+            List<String> messages = holidayGreetings.get(currentDateKey);
+            if (messages != null && !messages.isEmpty()) {
+                String msg = messages.get(random.nextInt(messages.size()));
+                Bukkit.broadcastMessage(colorize(msg));
+            }
+        }
+        lastHolidayDate = currentDateKey;
+    }
+
+    private String getCurrentDayPhaseKey(World world) {
         long ticks = world.getTime();
         long adjusted = (ticks + 6000) % 24000;
         int hour = (int) (adjusted / 1000);
@@ -189,10 +246,9 @@ public class JRPIndicators extends JavaPlugin implements CommandExecutor, TabCom
         return "night";
     }
 
-    private String getCurrentWeatherType(World world) {
+    private String getCurrentWeatherKey(World world) {
         if (!world.hasStorm()) return "sun";
         if (world.isThundering()) return "storm";
-
         Block block = world.getHighestBlockAt(world.getSpawnLocation());
         float temp = (float) block.getTemperature();
         return temp < 0.15f ? "snow" : "rain";
@@ -208,42 +264,147 @@ public class JRPIndicators extends JavaPlugin implements CommandExecutor, TabCom
         return "unknown";
     }
 
+    public int getGameYear(World world) {
+        long totalDays = world.getFullTime() / 24000L;
+        return (int) (totalDays / (daysPerMonth * 12L)) + startYear;
+    }
+
+    public String getZodiacAnimal(World world) {
+        int year = getGameYear(world);
+        int index = ((year - startYear) % 12 + 12) % 12 + 1;
+        return getConfig().getString("calendar.zodiac_animals.cycle." + index, "?");
+    }
+
     @Override
     public boolean onCommand(@NotNull CommandSender sender, @NotNull Command command, @NotNull String label, String[] args) {
-        if (command.getName().equalsIgnoreCase("rpreload")) {
+        if (args.length == 0) {
+            List<String> help = getConfig().getStringList("messages.help");
+            for (String line : help) {
+                sender.sendMessage(colorize(line));
+            }
+            return true;
+        }
+
+        String sub = args[0].toLowerCase();
+
+        if (sub.equals("reload")) {
             if (!sender.hasPermission("jrpindicators.admin")) {
-                sender.sendMessage(colorize(getConfig().getString("messages.no-permission","")));
+                sender.sendMessage(colorize(getConfig().getString("messages.no-permission", "")));
                 return true;
             }
 
             reloadConfig();
-            daysPerMonth = getConfig().getInt("calendar.months_days_count", 28);
+            loadConfigValues();
             loadSeasons();
             loadGreetings();
+            loadHolidays();
+
             lastDayPhase = "";
             lastWeather = "";
-            lastMonth = -1;
+            lastSeason = "";
+            lastZodiac = "";
+            lastHolidayDate = "";
 
             sender.sendMessage(colorize(getConfig().getString("messages.reload-success", "")));
             return true;
         }
-        return false;
+
+        if (sub.equals("set") && args.length >= 3) {
+            if (!sender.hasPermission("jrpindicators.admin")) {
+                sender.sendMessage(colorize(getConfig().getString("messages.no-permission", "")));
+                return true;
+            }
+
+            String type = args[1].toLowerCase();
+            String valueStr = args[2];
+
+            World world = getMainWorld();
+            if (world == null) {
+                sender.sendMessage(colorize("&cМир не найден!"));
+                return true;
+            }
+
+            long totalDays = world.getFullTime() / 24000L;
+            int currentDay = getGameDay(world);
+            int currentMonth = getGameMonth(world);
+            int currentYear = getGameYear(world);
+
+            long newTotalDays;
+
+            switch (type) {
+                case "day" -> {
+                    int value;
+                    try {
+                        value = Integer.parseInt(valueStr);
+                    } catch (NumberFormatException e) {
+                        sender.sendMessage(colorize(getConfig().getString("messages.invalid-number", "&cНеверное число!")));
+                        return true;
+                    }
+                    if (value < 1 || value > daysPerMonth) {
+                        sender.sendMessage(colorize(getConfig().getString("messages.invalid-day", "&cДень должен быть от 1 до %days%").replace("%days%", String.valueOf(daysPerMonth))));
+                        return true;
+                    }
+                    newTotalDays = (totalDays / daysPerMonth) * daysPerMonth + (value - 1);
+                    sender.sendMessage(colorize(getConfig().getString("messages.set-day-success", "&aДень установлен на &f%value%").replace("%value%", String.valueOf(value))));
+                }
+                case "month" -> {
+                    int value;
+                    try {
+                        value = Integer.parseInt(valueStr);
+                    } catch (NumberFormatException e) {
+                        sender.sendMessage(colorize(getConfig().getString("messages.invalid-number", "&cНеверное число!")));
+                        return true;
+                    }
+                    if (value < 1 || value > 12) {
+                        sender.sendMessage(colorize(getConfig().getString("messages.invalid-month", "&cМесяц должен быть от 1 до 12!")));
+                        return true;
+                    }
+                    newTotalDays = ((currentYear - startYear) * 12L + (value - 1)) * daysPerMonth + (currentDay - 1);
+                    sender.sendMessage(colorize(getConfig().getString("messages.set-month-success", "&aМесяц установлен на &f%value%").replace("%value%", String.valueOf(value))));
+                }
+                case "year" -> {
+                    int value;
+                    try {
+                        value = Integer.parseInt(valueStr);
+                    } catch (NumberFormatException e) {
+                        sender.sendMessage(colorize(getConfig().getString("messages.invalid-number", "&cНеверное число!")));
+                        return true;
+                    }
+                    newTotalDays = ((value - startYear) * 12L) * daysPerMonth + (currentMonth - 1L) * daysPerMonth + (currentDay - 1);
+                    sender.sendMessage(colorize(getConfig().getString("messages.set-year-success", "&aГод установлен на &f%value%").replace("%value%", String.valueOf(value))));
+                }
+                default -> {
+                    sender.sendMessage(colorize(getConfig().getString("messages.invalid-set", "&cНеверный тип: day, month или year")));
+                    return true;
+                }
+            }
+
+            world.setFullTime(newTotalDays * 24000L);
+            return true;
+        }
+
+        sender.sendMessage(colorize(getConfig().getString("messages.unknown-command", "&cНеизвестная команда. Используй /jrpi")));
+        return true;
     }
 
     @Override
     public List<String> onTabComplete(@NotNull CommandSender sender, @NotNull Command command, @NotNull String alias, String[] args) {
-        return Collections.emptyList();
+        List<String> completions = new ArrayList<>();
+
+        if (args.length == 1) {
+            completions.add("reload");
+            completions.add("set");
+        } else if (args.length == 2 && args[0].equalsIgnoreCase("set")) {
+            completions.add("day");
+            completions.add("month");
+            completions.add("year");
+        }
+
+        return completions;
     }
 
-    public String getDayPhase(World world) {
-        long ticks = world.getTime();
-        long adjusted = (ticks + 6000) % 24000;
-        int hour = (int) (adjusted / 1000);
-
-        if (hour >= 4 && hour < 12) return getConfig().getString("day.morning", "");
-        if (hour >= 12 && hour < 18) return getConfig().getString("day.day", "");
-        if (hour >= 18 && hour < 22) return getConfig().getString("day.evening", "");
-        return getConfig().getString("day.night", "");
+    public String getDayPhaseFormatted(World world) {
+        return colorize(getConfig().getString("day-type." + getCurrentDayPhaseKey(world), ""));
     }
 
     public String getFormattedTime(World world) {
@@ -251,8 +412,7 @@ public class JRPIndicators extends JavaPlugin implements CommandExecutor, TabCom
         long adjusted = (ticks + 6000) % 24000;
         int hours = (int) (adjusted / 1000);
         int minutes = (int) ((adjusted % 1000) * 60 / 1000);
-
-        String fmt = getConfig().getString("time-format", "");
+        String fmt = getConfig().getString("time-format", "HH:mm");
         return fmt
                 .replace("HH", String.format("%02d", hours))
                 .replace("H", String.valueOf(hours))
@@ -260,78 +420,66 @@ public class JRPIndicators extends JavaPlugin implements CommandExecutor, TabCom
                 .replace("m", String.valueOf(minutes));
     }
 
-    public String getWeather(Player player) {
-        World world = player.getWorld();
-        if (!world.hasStorm()) {
-            return getConfig().getString("weather.sun", "");
-        }
-        if (world.isThundering()) {
-            return getConfig().getString("weather.storm", "");
-        }
+    public String getWeatherFormatted(Player player) {
+        return colorize(getWeather(player));
+    }
 
-        float temperature = (float) player.getLocation().getBlock().getTemperature();
-        if (temperature < 0.15f) {
-            return getConfig().getString("weather.snow", "");
-        }
-        return getConfig().getString("weather.rain", "");
+    private String getWeather(Player player) {
+        World world = player.getWorld();
+        if (!world.hasStorm()) return getConfig().getString("weather.sun", "Ясно");
+        if (world.isThundering()) return getConfig().getString("weather.storm", "Гроза");
+        float temp = (float) player.getLocation().getBlock().getTemperature();
+        return temp < 0.15f ? getConfig().getString("weather.snow", "Снег") : getConfig().getString("weather.rain", "Дождь");
     }
 
     public int getGameDay(World world) {
-        long totalDays = world.getFullTime() / 24000;
+        long totalDays = world.getFullTime() / 24000L;
         return (int) ((totalDays % daysPerMonth) + 1);
     }
 
     public int getGameMonth(World world) {
-        long totalDays = world.getFullTime() / 24000;
+        long totalDays = world.getFullTime() / 24000L;
         return (int) ((totalDays / daysPerMonth) % 12 + 1);
     }
 
     public String getMonthName(int month) {
-        return getConfig().getString("calendar.months." + month, " " + month);
+        return getConfig().getString("calendar.months." + month, String.valueOf(month));
     }
 
     public int getWeekday(World world) {
-        long totalDays = world.getFullTime() / 24000;
-        long rawWeekday = totalDays % 7;
-        return (int) ((rawWeekday + 6) % 7 + 1);
+        long totalDays = world.getFullTime() / 24000L;
+        return (int) ((totalDays + 6) % 7 + 1);
     }
 
     public String getWeekdayName(int weekday) {
-        return getConfig().getString("calendar.weekdays." + weekday, " " + weekday);
+        return getConfig().getString("calendar.weekdays." + weekday, String.valueOf(weekday));
     }
 
     public String getSeasonName(World world) {
-        int month = getGameMonth(world);
-        for (Map.Entry<String, List<Integer>> entry : seasonMonths.entrySet()) {
-            if (entry.getValue().contains(month)) {
-                return seasonNames.getOrDefault(entry.getKey(), "&7Неизвестно");
-            }
-        }
-        return "&7Неизвестно";
+        String key = getSeasonKey(world);
+        return seasonNames.getOrDefault(key, "&7Неизвестно");
     }
 
     public String getDirection(Player player) {
         float yaw = player.getLocation().getYaw();
         if (yaw < 0) yaw += 360;
-        int index = Math.round(yaw / 45) % 8;
-        return getConfig().getString("directions.direction_" + index, "&7Неизвестно");
+        int index = Math.round(yaw / 45f) % 8;
+        return getConfig().getString("directions.direction_" + index, "Неизвестно");
     }
 
     public String getShortDirection(Player player) {
         float yaw = player.getLocation().getYaw();
         if (yaw < 0) yaw += 360;
-        int index = Math.round(yaw / 45) % 8;
+        int index = Math.round(yaw / 45f) % 8;
         return getConfig().getString("directions.short_" + index, "?");
     }
 
     public static String colorize(String msg) {
-        if (msg == null || msg.isEmpty()) {
-            return "";
-        }
+        if (msg == null || msg.isEmpty()) return "";
         return ChatColor.translateAlternateColorCodes('&', msg);
     }
 
-    private static class JRPIndicatorsExpansion extends PlaceholderExpansion {
+    private class JRPIndicatorsExpansion extends PlaceholderExpansion {
 
         private final JRPIndicators plugin;
 
@@ -360,16 +508,16 @@ public class JRPIndicators extends JavaPlugin implements CommandExecutor, TabCom
         }
 
         @Override
-        public String onPlaceholderRequest(Player player, @NotNull String params) {
-            if (player == null) return "";
+        public @Nullable String onPlaceholderRequest(Player player, @NotNull String params) {
+            if (player == null) return null;
 
             World world = player.getWorld();
 
             return switch (params.toLowerCase()) {
                 case "day" -> String.valueOf(plugin.getGameDay(world));
-                case "day_type" -> colorize(plugin.getDayPhase(world));
-                case "time" -> colorize(plugin.getFormattedTime(world));
-                case "weather" -> colorize(plugin.getWeather(player));
+                case "day_type" -> plugin.getDayPhaseFormatted(world);
+                case "time" -> plugin.getFormattedTime(world);
+                case "weather" -> plugin.getWeatherFormatted(player);
                 case "month" -> String.valueOf(plugin.getGameMonth(world));
                 case "month_name" -> plugin.getMonthName(plugin.getGameMonth(world));
                 case "weekday" -> String.valueOf(plugin.getWeekday(world));
@@ -377,8 +525,21 @@ public class JRPIndicators extends JavaPlugin implements CommandExecutor, TabCom
                 case "season" -> colorize(plugin.getSeasonName(world));
                 case "direction" -> colorize(plugin.getDirection(player));
                 case "direction_short" -> colorize(plugin.getShortDirection(player));
-                default -> "";
+                case "year" -> String.valueOf(plugin.getGameYear(world));
+                case "zodiac" -> colorize(plugin.getZodiacAnimal(world));
+                case "holiday_name" -> {
+                    String key = plugin.getGameMonth(world) + "-" + plugin.getGameDay(world);
+                    yield holidayNames.getOrDefault(key, "");
+                }
+                default -> null;
             };
+        }
+    }
+
+    @Override
+    public void onDisable() {
+        if (placeholderExpansion != null) {
+            placeholderExpansion.unregister();
         }
     }
 }

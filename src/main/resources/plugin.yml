@@ -7,10 +7,12 @@ softdepend: [PlaceholderAPI]
 description: RP-индикаторы и уведомления для ролевых серверов
 
 commands:
-  rpreload:
-    usage: /<command>
-    description: Перезагрузка плагина
+  jrpi:
+    description: Основная команда плагина
+    usage: /jrpi [reload|set <day|month|year> <значение>]
+    permission: jrpindicators.admin
 
 permissions:
   jrpindicators.admin:
+    description: Доступ к админ-командам
     default: op
